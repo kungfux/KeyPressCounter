@@ -1,26 +1,78 @@
-﻿using Gma.System.MouseKeyHook;
-using System.Timers;
+﻿namespace MWH.KeyPressCounter;
 
-namespace MWH.KeyPressCounter;
+using Gma.System.MouseKeyHook;
+using System.Timers;
 
 public class CustomApplicationContext : ApplicationContext
 {
-    private readonly string dailyLogFilePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "DailySummaryLog.txt");
-    private System.Timers.Timer dailyLogTimer;
-    private IKeyboardMouseEvents globalHook;
-    private readonly Counter keyPressCounter = new();
-    private readonly string logFilePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "ActivityLog.txt");
-    private System.Timers.Timer logTimer;
-    private readonly Counter mouseClickCounter = new();
-    private NotifyIcon trayIcon;
+    private readonly string _dailyLogFilePath =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "DailySummaryLog.txt");
+
+    private readonly string _logFilePath =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "ActivityLog.txt");
+
+    private readonly Counter _keyPressCounter = new();
+    private readonly Counter _mouseClickCounter = new();
+    private NotifyIcon? _trayIcon;
+    private Timer? _dailyLogTimer;
+    private Timer? _logTimer;
+    private IKeyboardMouseEvents? _globalHook;
 
     public CustomApplicationContext()
     {
-
         InitializeContext();
         StartGlobalHooks();
         SetupLogTimer();
         SetupDailyLogTimer();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _trayIcon?.Dispose();
+            _logTimer?.Dispose();
+            _dailyLogTimer?.Dispose();
+            _globalHook?.Dispose();
+        }
+
+        base.Dispose(disposing);
+    }
+
+    private void InitializeContext()
+    {
+        _trayIcon = new NotifyIcon()
+        {
+            Icon = new Icon("favicon.ico"),
+            ContextMenuStrip = CreateContextMenu(),
+            Visible = true,
+            Text = "Double Click Icon for Stats"
+        };
+
+        _trayIcon.DoubleClick += TrayIcon_DoubleClick;
+    }
+
+    private void StartGlobalHooks()
+    {
+        _globalHook = Hook.GlobalEvents();
+        _globalHook.KeyPress += (sender, e) => _keyPressCounter.Increment();
+        _globalHook.MouseClick += (sender, e) => _mouseClickCounter.Increment();
+    }
+
+    private void SetupLogTimer()
+    {
+        _logTimer = new Timer(TimeSpan.FromSeconds(60).TotalMilliseconds);
+        _logTimer.Elapsed += LogActivity;
+        _logTimer.AutoReset = true;
+        _logTimer.Enabled = true;
+    }
+
+    private void SetupDailyLogTimer()
+    {
+        _dailyLogTimer = new Timer(GetRemainingTimeUntilEndOfDay().TotalMilliseconds);
+        _dailyLogTimer.Elapsed += LogDailySummary;
+        _dailyLogTimer.AutoReset = false;
+        _dailyLogTimer.Enabled = true;
     }
 
     private ContextMenuStrip CreateContextMenu()
@@ -35,98 +87,53 @@ public class CustomApplicationContext : ApplicationContext
         return menu;
     }
 
-
-    private void Exit_Click(object sender, EventArgs e)
+    private static void Exit_Click(object? sender, EventArgs? e)
     {
         Application.Exit();
     }
 
-    private TimeSpan GetRemainingTimeUntilEndOfDay()
+    private static TimeSpan GetRemainingTimeUntilEndOfDay()
     {
-        DateTime now = DateTime.Now;
-        DateTime endOfDay = new DateTime(now.Year, now.Month, now.Day).AddDays(1);
+        var now = DateTime.Now;
+        var endOfDay = new DateTime(
+            new DateOnly(now.Year, now.Month, now.Day),
+            new TimeOnly(23, 59, 59),
+            DateTimeKind.Local);
         return endOfDay - now;
     }
 
-
-    private void InitializeContext()
+    private void LogActivity(object? sender, ElapsedEventArgs? e)
     {
-        trayIcon = new NotifyIcon()
-        {
-            Icon = new Icon("favicon.ico"), // Set your icon here
-            ContextMenuStrip = CreateContextMenu(), // Optional: Set if you want a right-click menu
-            Visible = true,
-            Text = "Double Click Icon for Stats"
-        };
-        // Optional: Handle double-click event
-        trayIcon.DoubleClick += TrayIcon_DoubleClick;
+        _keyPressCounter.UpdateIntervalMetrics();
+        _mouseClickCounter.UpdateIntervalMetrics();
+
+        var log =
+            $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}: Keystrokes: {_keyPressCounter.TotalCount}, Mouse Clicks: {_mouseClickCounter.TotalCount}, Max Keystrokes/Min: {_keyPressCounter.MaxPerInterval}, Max Clicks/Min: {_mouseClickCounter.MaxPerInterval}";
+        File.AppendAllText(_logFilePath, $"{log}{Environment.NewLine}");
     }
 
-    private void LogActivity(object sender, ElapsedEventArgs e)
+    private void LogDailySummary(object? sender, ElapsedEventArgs? e)
     {
-        keyPressCounter.UpdateIntervalMetrics();
-        mouseClickCounter.UpdateIntervalMetrics();
+        var minutesInDay = TimeSpan.FromDays(1).TotalMinutes;
+        var averageClicksPerMinute = _mouseClickCounter.TotalCount / minutesInDay;
+        var log =
+            $"{DateTime.Now:yyyy-MM-dd}: Total Keystrokes: {_keyPressCounter.TotalCount}, Total Mouse Clicks: {_mouseClickCounter.TotalCount}, Avg Clicks/Min: {averageClicksPerMinute:F2}, Longest No Click Period: {_mouseClickCounter.LongestIntervalWithoutIncrement} minutes";
+        File.AppendAllText(_dailyLogFilePath, $"{log}{Environment.NewLine}");
 
-        string log = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}: Keystrokes: {keyPressCounter.TotalCount}, Mouse Clicks: {mouseClickCounter.TotalCount}, Max Keystrokes/Min: {keyPressCounter.MaxPerInterval}, Max Clicks/Min: {mouseClickCounter.MaxPerInterval}";
-        File.AppendAllText(logFilePath, $"{log}{Environment.NewLine}");
-    }
+        _keyPressCounter.ResetTotalMetrics();
+        _mouseClickCounter.ResetTotalMetrics();
 
-    private void LogDailySummary(object sender, ElapsedEventArgs e)
-    {
-        double averageClicksPerMinute = mouseClickCounter.TotalCount / 1440.0; // 1440 minutes in a day
-        string log = $"{DateTime.Now:yyyy-MM-dd}: Total Keystrokes: {keyPressCounter.TotalCount}, Total Mouse Clicks: {mouseClickCounter.TotalCount}, Avg Clicks/Min: {averageClicksPerMinute:F2}, Longest No Click Period: {mouseClickCounter.LongestIntervalWithoutIncrement} minutes";
-        File.AppendAllText(dailyLogFilePath, $"{log}{Environment.NewLine}");
-
-        keyPressCounter.ResetTotalMetrics();
-        mouseClickCounter.ResetTotalMetrics();
-
-        // Set up the timer for the next day
         SetupDailyLogTimer();
     }
 
-    private void SetupDailyLogTimer()
-    {
-        dailyLogTimer = new System.Timers.Timer(GetRemainingTimeUntilEndOfDay().TotalMilliseconds);
-        dailyLogTimer.Elapsed += LogDailySummary;
-        dailyLogTimer.AutoReset = false; // Only trigger once
-        dailyLogTimer.Enabled = true;
-    }
-
-    private void SetupLogTimer()
-    {
-        logTimer = new System.Timers.Timer(60000); // 60 seconds
-        logTimer.Elapsed += LogActivity;
-        logTimer.AutoReset = true;
-        logTimer.Enabled = true;
-    }
-
-    private void StartGlobalHooks()
-    {
-        globalHook = Hook.GlobalEvents();
-        globalHook.KeyPress += (sender, e) => keyPressCounter.Increment();
-        globalHook.MouseClick += (sender, e) => mouseClickCounter.Increment();
-    }
-    private void TrayIcon_DoubleClick(object sender, EventArgs e)
+    private void TrayIcon_DoubleClick(object? sender, EventArgs? e)
     {
         UpdateTrayIconText();
     }
 
     private void UpdateTrayIconText()
     {
-        string log = $"\n Keystrokes: {keyPressCounter} \n Mouse Clicks: {mouseClickCounter}";
-        trayIcon.ShowBalloonTip(5000, "KeyPressCounter Stats", $"{log}", ToolTipIcon.Info);
-    }
-
-    // Make sure to dispose of the timers and globalHook properly
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing)
-        {
-            trayIcon?.Dispose();
-            logTimer?.Dispose();
-            dailyLogTimer?.Dispose();
-            globalHook?.Dispose();
-        }
-        base.Dispose(disposing);
+        var log = $"\n Keystrokes: {_keyPressCounter} \n Mouse Clicks: {_mouseClickCounter}";
+        _trayIcon?.ShowBalloonTip(5000, "KeyPressCounter Stats", $"{log}", ToolTipIcon.Info);
     }
 }
